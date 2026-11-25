@@ -1,0 +1,42 @@
+name: Mirror Kernel browser image
+
+on:
+  schedule:
+    - cron: "30 14 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find newest upstream tag on Docker Hub
+        id: upstream
+        run: |
+          TAG=$(curl -s "https://hub.docker.com/v2/repositories/onkernel/chromium-headful/tags?page_size=25&ordering=last_updated" | jq -r '.results[].name' | grep -E '^[0-9a-f]{7}$' | head -n1)
+          if [ -z "$TAG" ]; then echo "No upstream tag found" >&2; exit 1; fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Newest upstream tag: $TAG"
+      - name: Check whether this tag is already mirrored
+        id: check
+        run: |
+          TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:${{ github.repository_owner }}/kernel-browser:pull" | jq -r '.token // empty')
+          DIGEST=""
+          if [ -n "$TOKEN" ]; then
+            DIGEST=$(curl -sI -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json" "https://ghcr.io/v2/${{ github.repository_owner }}/kernel-browser/manifests/${{ steps.upstream.outputs.tag }}" | grep -i '^docker-content-digest:' | awk '{print $2}' | tr -d '\r')
+          fi
+          if [ -n "$DIGEST" ]; then echo "exists=true" >> "$GITHUB_OUTPUT"; else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
+      - name: Log in to GHCR
+        if: steps.check.outputs.exists != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Mirror image to GHCR
+        if: steps.check.outputs.exists != 'true'
+        run: |
+          docker buildx imagetools create --tag ghcr.io/${{ github.repository_owner }}/kernel-browser:latest --tag ghcr.io/${{ github.repository_owner }}/kernel-browser:${{ steps.upstream.outputs.tag }} docker.io/onkernel/chromium-headful:${{ steps.upstream.outputs.tag }}
